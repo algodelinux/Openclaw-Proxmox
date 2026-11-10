@@ -18,7 +18,7 @@ Deploy your own **[OpenClaw](https://openclaw.ai/) AI assistant** on any Proxmox
 SSH into your Proxmox host and run:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/adadrag/Openclaw-Proxmox/main/setup-openclaw-lxc.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/algodelinux/Openclaw-Proxmox/main/setup-openclaw-lxc.sh)
 ```
 
 That's it. The script will ask for a password, pick sensible defaults for everything else, and print your connection URLs when done.
@@ -27,14 +27,14 @@ That's it. The script will ask for a password, pick sensible defaults for everyt
 
 **Download first, then run:**
 ```bash
-wget -O setup-openclaw-lxc.sh https://raw.githubusercontent.com/adadrag/Openclaw-Proxmox/main/setup-openclaw-lxc.sh
+wget -O setup-openclaw-lxc.sh https://raw.githubusercontent.com/algodelinux/Openclaw-Proxmox/main/setup-openclaw-lxc.sh
 chmod +x setup-openclaw-lxc.sh
 ./setup-openclaw-lxc.sh
 ```
 
 **Clone the repo:**
 ```bash
-git clone https://github.com/adadrag/Openclaw-Proxmox.git
+git clone https://github.com/algodelinux/Openclaw-Proxmox.git
 cd Openclaw-Proxmox
 chmod +x setup-openclaw-lxc.sh
 ./setup-openclaw-lxc.sh
