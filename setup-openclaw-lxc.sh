@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# OpenClaw Proxmox LXC Setup Script
+# OpenClaw Proxmox LXC Setup Script (Con corrección de DNS en LXC)
 # ==============================================================================
 
 set -euo pipefail
@@ -34,8 +34,8 @@ read -p "Memoria RAM (MB) [4096]: " MEMORY; MEMORY=${MEMORY:-4096}
 read -p "Cores CPU [4]: " CPU_CORES; CPU_CORES=${CPU_CORES:-4}
 read -p "Resolución VNC [1920x1080]: " VNC_RES; VNC_RES=${VNC_RES:-1920x1080}
 
-NEXT_CTID=$(pvesh get /cluster/nextid)
-read -p "CTID del contenedor [${NEXT_CTID}]: " CTID; CTID=${CTID:-$NEXT_CTID}
+NEXT_VMID=$(pvesh get /cluster/nextid)
+read -p "VMID del contenedor [${NEXT_VMID}]: " VMID; VMID=${VMID:-$NEXT_VMID}
 
 # 2. Selección estricta de almacenamiento LXC (Filtrando contenido 'rootdir')
 STORAGE=$(pvesm status -content rootdir | awk 'NR>1 {print $1}' | head -n1)
@@ -62,9 +62,9 @@ echo -e "${YELLOW}[+] Descargando ${TEMPLATE_FILE} en '${TEMPLATE_STORAGE}'...${
 pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_FILE" >/dev/null 2>&1 || true
 TEMPLATE_PATH="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_FILE}"
 
-# 4. Creación e inicio del contenedor
-echo -e "${YELLOW}[+] Creando contenedor LXC ${CTID}...${NC}"
-pct create "$CTID" "$TEMPLATE_PATH" \
+# 4. Creación e inicio del contenedor con DNS asignado
+echo -e "${YELLOW}[+] Creando contenedor LXC ${VMID}...${NC}"
+pct create "$VMID" "$TEMPLATE_PATH" \
   --ostype debian \
   --hostname openclaw-ai \
   --cores "$CPU_CORES" \
@@ -75,20 +75,25 @@ pct create "$CTID" "$TEMPLATE_PATH" \
   --storage "$STORAGE" \
   --rootfs "${STORAGE}:${DISK_SIZE}" \
   --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --nameserver "1.1.1.1 8.8.8.8" \
   --password "$CONTAINER_PASSWORD" \
   --start 1
 
 echo -e "${YELLOW}[+] Esperando a que el contenedor inicie red...${NC}"
 sleep 5
 
-# 5. Generación del script interno en el host para evitar errores de EOF anidados
-HOST_TEMP_SCRIPT="/tmp/openclaw-provision-${CTID}.sh"
+# 5. Generación del script interno en el host
+HOST_TEMP_SCRIPT="/tmp/openclaw-provision-${VMID}.sh"
 
 cat << EOF > "$HOST_TEMP_SCRIPT"
 #!/bin/bash
 set -ex
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Forzar resolución DNS pública antes de actualizar repositorios
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
 # Actualizar repos e instalar dependencias básicas y entorno gráfico
 apt-get update && apt-get install -y \\
@@ -174,23 +179,23 @@ EOF
 
 # 6. Copiar script al contenedor y ejecutarlo
 echo -e "${YELLOW}[+] Transfiriendo script de instalación al contenedor...${NC}"
-pct push "$CTID" "$HOST_TEMP_SCRIPT" /tmp/provision.sh
-pct exec "$CTID" -- chmod +x /tmp/provision.sh
+pct push "$VMID" "$HOST_TEMP_SCRIPT" /tmp/provision.sh
+pct exec "$VMID" -- chmod +x /tmp/provision.sh
 
 echo -e "${YELLOW}[+] Ejecutando instalación dentro del contenedor LXC...${NC}"
-pct exec "$CTID" -- /tmp/provision.sh
+pct exec "$VMID" -- /tmp/provision.sh
 
 # Limpieza de archivos temporales
 rm -f "$HOST_TEMP_SCRIPT"
-pct exec "$CTID" -- rm -f /tmp/provision.sh
+pct exec "$VMID" -- rm -f /tmp/provision.sh
 
 # 7. Resumen final
-CONTAINER_IP=$(pct exec "$CTID" -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || true)
+CONTAINER_IP=$(pct exec "$VMID" -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || true)
 
 echo -e "\n${GREEN}====================================================${NC}"
 echo -e "${GREEN}    ¡Instalación de OpenClaw completada con éxito!  ${NC}"
 echo -e "${GREEN}====================================================${NC}"
-echo -e "CTID del contenedor : ${CTID}"
+echo -e "VMID del contenedor : ${VMID}"
 echo -e "Almacenamiento usado: ${STORAGE}"
 echo -e "IP del contenedor   : ${CONTAINER_IP:-'Asignada por DHCP'}"
 echo -e "----------------------------------------------------"
