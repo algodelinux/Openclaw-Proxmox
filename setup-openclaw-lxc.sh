@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# OpenClaw Proxmox LXC Setup Script
+# OpenClaw Proxmox LXC Setup Script (Con corrección de fuentes emoji)
 # ==============================================================================
 
 set -euo pipefail
@@ -110,11 +110,11 @@ Components: main contrib non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 SOURCES
 
-# Actualizar repos e instalar dependencias básicas y entorno gráfico
+# Actualizar repos e instalar dependencias básicas y entorno gráfico (usando fonts-noto-color-emoji)
 apt-get update && apt-get install -y \\
   curl wget git build-essential ca-certificates sudo \\
   lxqt lxterminal tigervnc-standalone-server novnc dbus-x11 \\
-  noto-color-emoji htop net-tools x11-utils
+  fonts-noto-color-emoji htop net-tools x11-utils
 
 # Google Chrome
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
