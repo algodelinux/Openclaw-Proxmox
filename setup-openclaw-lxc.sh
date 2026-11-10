@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# ==============================================================================
+# =================================
 # OpenClaw Proxmox LXC Setup Script
-# ==============================================================================
+# =================================
 
 set -euo pipefail
 
@@ -154,15 +154,26 @@ wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.de
 apt-get install -y /tmp/chrome.deb || apt-get install -fy
 rm -f /tmp/chrome.deb
 
-# Node.js 24 (Requerido por las versiones actuales de OpenClaw)
+# Node.js 24 y actualización de npm
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 apt-get install -y nodejs
+npm install -g npm@latest
 npm install -g openclaw@latest
 
-# Configuración VNC
+# Configuración de mapeo de usuario para TigerVNC
+mkdir -p /etc/tigervnc
+echo ":1=root" > /etc/tigervnc/vncserver.users
+
+# Configuración VNC y archivo de opciones
 mkdir -p /root/.vnc
 echo "$CONTAINER_PASSWORD" | vncpasswd -f > /root/.vnc/passwd
 chmod 600 /root/.vnc/passwd
+
+cat << VNCCONF > /root/.vnc/config
+geometry=${VNC_RES}
+depth=24
+localhost=no
+VNCCONF
 
 cat << 'XSTART' > /root/.vnc/xstartup
 #!/bin/sh
@@ -172,8 +183,8 @@ exec startlxqt
 XSTART
 chmod +x /root/.vnc/xstartup
 
-# Servicios Systemd (con variables de entorno HOME y USER explicitadas)
-cat << SERV_VNC > /etc/systemd/system/vncserver.service
+# Servicios Systemd
+cat << 'SERV_VNC' > /etc/systemd/system/vncserver.service
 [Unit]
 Description=TigerVNC Server
 After=network.target
@@ -184,7 +195,8 @@ User=root
 Environment=HOME=/root
 Environment=USER=root
 ExecStartPre=-/usr/bin/vncserver -kill :1
-ExecStart=/usr/bin/vncserver :1 -geometry ${VNC_RES} -depth 24
+ExecStartPre=-/bin/rm -rf /tmp/.X1-lock /tmp/.X11-unix/X1
+ExecStart=/usr/bin/vncserver :1
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
 
