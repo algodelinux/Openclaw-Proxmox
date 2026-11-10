@@ -129,7 +129,7 @@ echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
 echo 'Acquire::http::Timeout "15";' >> /etc/apt/apt.conf.d/80retries
 
 # ------------------------------------------------------------------------------
-# Configuración e Instalación Temprana de Locales (Antes de instalar resto de paquetes)
+# Configuración e Instalación Temprana de Locales
 # ------------------------------------------------------------------------------
 apt-get update
 apt-get install -y locales
@@ -154,10 +154,10 @@ wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.de
 apt-get install -y /tmp/chrome.deb || apt-get install -fy
 rm -f /tmp/chrome.deb
 
-# Node.js 22 y OpenClaw
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+# Node.js 24 (Requerido por las versiones actuales de OpenClaw)
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 apt-get install -y nodejs
-npm install -g openclaw@latest || true
+npm install -g openclaw@latest
 
 # Configuración VNC
 mkdir -p /root/.vnc
@@ -172,7 +172,7 @@ exec startlxqt
 XSTART
 chmod +x /root/.vnc/xstartup
 
-# Servicios Systemd
+# Servicios Systemd (con variables de entorno HOME y USER explicitadas)
 cat << SERV_VNC > /etc/systemd/system/vncserver.service
 [Unit]
 Description=TigerVNC Server
@@ -181,6 +181,9 @@ After=network.target
 [Service]
 Type=forking
 User=root
+Environment=HOME=/root
+Environment=USER=root
+ExecStartPre=-/usr/bin/vncserver -kill :1
 ExecStart=/usr/bin/vncserver :1 -geometry ${VNC_RES} -depth 24
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
