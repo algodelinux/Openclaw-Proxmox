@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# OpenClaw Proxmox LXC Setup Script (Con locales configurados al inicio)
+# OpenClaw Proxmox LXC Setup Script
 # ==============================================================================
 
 set -euo pipefail
@@ -85,9 +85,12 @@ sleep 5
 # 5. Generación del script interno en el host
 HOST_TEMP_SCRIPT="/tmp/openclaw-provision-${VMID}.sh"
 
-cat << EOF > "$HOST_TEMP_SCRIPT"
+cat << 'EOF_PROVISION' > "$HOST_TEMP_SCRIPT"
 #!/bin/bash
 set -ex
+
+CONTAINER_PASSWORD="$1"
+VNC_RES="$2"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -117,7 +120,7 @@ for i in {1..20}; do
     echo "[+] Red y DNS operativos."
     break
   fi
-  echo "Esperando respuesta de red (\$i/20)..."
+  echo "Esperando respuesta de red ($i/20)..."
   sleep 2
 done
 
@@ -141,9 +144,9 @@ export LC_ALL=en_US.UTF-8
 # ------------------------------------------------------------------------------
 # Instalación de dependencias básicas y entorno gráfico
 # ------------------------------------------------------------------------------
-apt-get install -y \\
-  curl wget git build-essential ca-certificates sudo \\
-  lxqt lxterminal tigervnc-standalone-server novnc dbus-x11 \\
+apt-get install -y \
+  curl wget git build-essential ca-certificates sudo \
+  lxqt lxterminal tigervnc-standalone-server novnc dbus-x11 \
   fonts-noto-color-emoji htop net-tools x11-utils
 
 # Google Chrome
@@ -158,7 +161,7 @@ npm install -g openclaw@latest || true
 
 # Configuración VNC
 mkdir -p /root/.vnc
-echo '${CONTAINER_PASSWORD}' | vncpasswd -f > /root/.vnc/passwd
+echo "$CONTAINER_PASSWORD" | vncpasswd -f > /root/.vnc/passwd
 chmod 600 /root/.vnc/passwd
 
 cat << 'XSTART' > /root/.vnc/xstartup
@@ -170,7 +173,7 @@ XSTART
 chmod +x /root/.vnc/xstartup
 
 # Servicios Systemd
-cat << 'SERV_VNC' > /etc/systemd/system/vncserver.service
+cat << SERV_VNC > /etc/systemd/system/vncserver.service
 [Unit]
 Description=TigerVNC Server
 After=network.target
@@ -220,15 +223,15 @@ systemctl daemon-reload
 systemctl enable openclaw-gateway vncserver novnc
 systemctl start openclaw-gateway vncserver novnc || true
 
-EOF
+EOF_PROVISION
 
-# 6. Copiar script al contenedor y ejecutarlo
+# 6. Copiar script al contenedor y ejecutarlo pasando los parámetros requeridos
 echo -e "${YELLOW}[+] Transfiriendo script de instalación al contenedor...${NC}"
 pct push "$VMID" "$HOST_TEMP_SCRIPT" /tmp/provision.sh
 pct exec "$VMID" -- chmod +x /tmp/provision.sh
 
 echo -e "${YELLOW}[+] Ejecutando instalación dentro del contenedor LXC...${NC}"
-pct exec "$VMID" -- /tmp/provision.sh
+pct exec "$VMID" -- /tmp/provision.sh "$CONTAINER_PASSWORD" "$VNC_RES"
 
 # Limpieza de archivos temporales
 rm -f "$HOST_TEMP_SCRIPT"
