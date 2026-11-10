@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# OpenClaw Proxmox LXC Setup Script (Con configuración de Locales y DNS)
+# OpenClaw Proxmox LXC Setup Script
 # ==============================================================================
 
 set -euo pipefail
@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${BLUE}====================================================${NC}"
-echo -e "${BLUE}     OpenClaw AI Assistant Proxmox LXC Setup        ${NC}"
+echo -e "${BLUE}     OpenClaw AI Assistant Proxmox LXC Setup${NC}"
 echo -e "${BLUE}====================================================${NC}\n"
 
 if [ "$EUID" -ne 0 ]; then
@@ -58,7 +58,7 @@ if [ -z "$TEMPLATE_FILE" ]; then
   exit 1
 fi
 
-echo -e "${YELLOW}[+] Descargando ${TEMPLATE_FILE} en '${TEMPLATE_STORAGE}'...${NC}"
+echo -e "${YELLOW}[+] Descargando${TEMPLATE_FILE} en '${TEMPLATE_STORAGE}'...${NC}"
 pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_FILE" >/dev/null 2>&1 || true
 TEMPLATE_PATH="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_FILE}"
 
@@ -115,129 +115,3 @@ echo "[+] Verificando resolución de red y DNS dentro del contenedor..."
 for i in {1..20}; do
   if ping -c 1 deb.debian.org >/dev/null 2>&1; then
     echo "[+] Red y DNS operativos."
-    break
-  fi
-  echo "Esperando respuesta de red (\$i/20)..."
-  sleep 2
-done
-
-# Configurar reintentos automáticos para evitar errores por micro-cortes
-echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
-echo 'Acquire::http::Timeout "15";' >> /etc/apt/apt.conf.d/80retries
-
-# Actualizar repos e instalar dependencias básicas, locales y entorno gráfico
-apt-get update && apt-get install -y \\
-  curl wget git build-essential ca-certificates sudo locales \\
-  lxqt lxterminal tigervnc-standalone-server novnc dbus-x11 \\
-  fonts-noto-color-emoji htop net-tools x11-utils
-
-# Configuración de Locales (en_US y es_ES)
-sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-sed -i 's/# es_ES.UTF-8 UTF-8/es_ES.UTF-8 UTF-8/' /etc/locale.gen
-locale-gen
-update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
-
-# Google Chrome
-wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
-apt-get install -y /tmp/chrome.deb || apt-get install -fy
-rm -f /tmp/chrome.deb
-
-# Node.js 22 y OpenClaw
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install -y nodejs
-npm install -g openclaw@latest || true
-
-# Configuración VNC
-mkdir -p /root/.vnc
-echo '${CONTAINER_PASSWORD}' | vncpasswd -f > /root/.vnc/passwd
-chmod 600 /root/.vnc/passwd
-
-cat << 'XSTART' > /root/.vnc/xstartup
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-exec startlxqt
-XSTART
-chmod +x /root/.vnc/xstartup
-
-# Servicios Systemd
-cat << 'SERV_VNC' > /etc/systemd/system/vncserver.service
-[Unit]
-Description=TigerVNC Server
-After=network.target
-
-[Service]
-Type=forking
-User=root
-ExecStart=/usr/bin/vncserver :1 -geometry ${VNC_RES} -depth 24
-ExecStop=/usr/bin/vncserver -kill :1
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-SERV_VNC
-
-cat << 'SERV_NOVNC' > /etc/systemd/system/novnc.service
-[Unit]
-Description=noVNC Web Proxy
-After=vncserver.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/share/novnc/utils/novnc_proxy --vnc localhost:5901 --listen 6080
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SERV_NOVNC
-
-cat << 'SERV_OPENCLAW' > /etc/systemd/system/openclaw-gateway.service
-[Unit]
-Description=OpenClaw Gateway Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/bin/env openclaw gateway
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SERV_OPENCLAW
-
-systemctl daemon-reload
-systemctl enable openclaw-gateway vncserver novnc
-systemctl start openclaw-gateway vncserver novnc || true
-
-EOF
-
-# 6. Copiar script al contenedor y ejecutarlo
-echo -e "${YELLOW}[+] Transfiriendo script de instalación al contenedor...${NC}"
-pct push "$VMID" "$HOST_TEMP_SCRIPT" /tmp/provision.sh
-pct exec "$VMID" -- chmod +x /tmp/provision.sh
-
-echo -e "${YELLOW}[+] Ejecutando instalación dentro del contenedor LXC...${NC}"
-pct exec "$VMID" -- /tmp/provision.sh
-
-# Limpieza de archivos temporales
-rm -f "$HOST_TEMP_SCRIPT"
-pct exec "$VMID" -- rm -f /tmp/provision.sh
-
-# 7. Resumen final
-CONTAINER_IP=$(pct exec "$VMID" -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || true)
-
-echo -e "\n${GREEN}====================================================${NC}"
-echo -e "${GREEN}    ¡Instalación de OpenClaw completada con éxito!  ${NC}"
-echo -e "${GREEN}====================================================${NC}"
-echo -e "VMID del contenedor : ${VMID}"
-echo -e "Almacenamiento usado: ${STORAGE}"
-echo -e "IP del contenedor   : ${CONTAINER_IP:-'Asignada por DHCP'}"
-echo -e "----------------------------------------------------"
-echo -e "Dashboard OpenClaw  : http://${CONTAINER_IP:-'<IP-CONTENEDOR>'}:18789/"
-echo -e "Escritorio noVNC    : http://${CONTAINER_IP:-'<IP-CONTENEDOR>'}:6080/vnc.html"
-echo -e "Acceso SSH          : ssh root@${CONTAINER_IP:-'<IP-CONTENEDOR>'}"
-echo -e "====================================================\n"
