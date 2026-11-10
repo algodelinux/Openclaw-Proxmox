@@ -1,507 +1,266 @@
 #!/usr/bin/env bash
-#
-# setup-openclaw-lxc.sh — Automated OpenClaw AI assistant setup in a Proxmox LXC container
-#
-# Run this script directly on the Proxmox host.
-# It creates a Debian 13 LXC, installs OpenClaw + LXQt desktop + Google Chrome + VNC/noVNC,
-# and prints connection info when done.
-#
+
+# ==============================================================================
+# OpenClaw Proxmox LXC Automated Setup Script (Con corrección de Storage LXC)
+# ==============================================================================
 
 set -euo pipefail
 
-# ─── Colors ───────────────────────────────────────────────────────────────────
+# Definición de colores
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
-info()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
-fatal() { err "$@"; exit 1; }
+echo -e "${BLUE}====================================================${NC}"
+echo -e "${BLUE}     OpenClaw AI Assistant Proxmox LXC Setup        ${NC}"
+echo -e "${BLUE}====================================================${NC}"
+echo ""
 
-# ─── Pre-flight checks ───────────────────────────────────────────────────────
-command -v pct  >/dev/null 2>&1 || fatal "pct not found — this script must run on a Proxmox host."
-command -v pvesh >/dev/null 2>&1 || fatal "pvesh not found — this script must run on a Proxmox host."
-command -v pveam >/dev/null 2>&1 || fatal "pveam not found — this script must run on a Proxmox host."
-[[ $(id -u) -eq 0 ]] || fatal "This script must be run as root."
+# Verificación de permisos de súperusuario
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}[ERROR] Este script debe ejecutarse como root en el host Proxmox VE.${NC}"
+  exit 1
+fi
 
-# ─── User prompts ────────────────────────────────────────────────────────────
-echo -e "${BOLD}╔═══════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║     OpenClaw LXC Setup for Proxmox               ║${NC}"
-echo -e "${BOLD}╚═══════════════════════════════════════════════════╝${NC}"
-echo
+# ------------------------------------------------------------------------------
+# 1. Parámetros interactivos
+# ------------------------------------------------------------------------------
 
-read -rp "Container password: " -s CT_PASSWORD
-echo
-[[ -n "$CT_PASSWORD" ]] || fatal "Password cannot be empty."
+read -sp "Ingrese la contraseña para el contenedor root / VNC: " CONTAINER_PASSWORD
+echo ""
+if [ -z "$CONTAINER_PASSWORD" ]; then
+  echo -e "${RED}[ERROR] La contraseña es obligatoria.${NC}"
+  exit 1
+fi
 
-read -rp "Disk size in GB [32]: " DISK_SIZE
-DISK_SIZE="${DISK_SIZE:-32}"
+read -p "Tamaño de disco (GB) [Por defecto: 32]: " DISK_SIZE
+DISK_SIZE=${DISK_SIZE:-32}
 
-read -rp "Memory in MB [4096]: " MEMORY
-MEMORY="${MEMORY:-4096}"
+read -p "Memoria RAM (MB) [Por defecto: 4096]: " MEMORY
+MEMORY=${MEMORY:-4096}
 
-read -rp "CPU cores [4]: " CORES
-CORES="${CORES:-4}"
+read -p "Cores de CPU [Por defecto: 4]: " CPU_CORES
+CPU_CORES=${CPU_CORES:-4}
 
-read -rp "VNC resolution [1920x1080]: " VNC_RES
-VNC_RES="${VNC_RES:-1920x1080}"
+read -p "Resolución VNC [Por defecto: 1920x1080]: " VNC_RES
+VNC_RES=${VNC_RES:-1920x1080}
 
-echo
+# ------------------------------------------------------------------------------
+# 2. Autodetección de recursos (MÉTODO 3 APLICADO)
+# ------------------------------------------------------------------------------
+echo -e "\n${YELLOW}[+] Detectando configuración del cluster/nodo Proxmox...${NC}"
 
-# ─── Auto-detect next VMID ───────────────────────────────────────────────────
-info "Detecting next available VMID..."
-VMID=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null \
-  | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-ids = [r["vmid"] for r in data if "vmid" in r]
-print(max(ids) + 1 if ids else 100)
-' 2>/dev/null || echo 100)
-ok "Will use VMID: $VMID"
+# 2.1. Obtener el siguiente VMID disponible
+NEXT_VMID=$(pvesh get /cluster/nextid)
+read -p "VMID del contenedor [Por defecto: ${NEXT_VMID}]: " VMID
+VMID=${VMID:-$NEXT_VMID}
 
-# ─── Auto-detect storage ─────────────────────────────────────────────────────
-info "Detecting storage..."
+# 2.2. MÉTODO 3: Filtrar únicamente almasenamientos que soporten contenedores ('rootdir')
+STORAGE=$(pvesm status -content rootdir | awk 'NR>1 {print $1}' | head -n1)
 
-# Find template storage (supports vztmpl content)
-TMPL_STORAGE=$(pvesh get /storage --output-format json 2>/dev/null \
-  | python3 -c '
-import json, sys
-stores = json.load(sys.stdin)
-for s in stores:
-    content = s.get("content", "")
-    if "vztmpl" in content:
-        print(s["storage"])
-        break
-' 2>/dev/null || echo "local")
+# Fallback en caso de que no devuelva resultados por formato de versión previa
+if [ -z "$STORAGE" ]; then
+  STORAGE=$(pvesm status | awk 'NR>1 && ($2=="dir" || $2=="zfspool" || $2=="lvmthin" || $2=="btrfs") {print $1}' | head -n1)
+fi
 
-# Find rootdir storage (prefer local-lvm, then any with rootdir)
-ROOT_STORAGE=$(pvesh get /storage --output-format json 2>/dev/null \
-  | python3 -c '
-import json, sys
-stores = json.load(sys.stdin)
-candidates = []
-for s in stores:
-    content = s.get("content", "")
-    if "rootdir" in content or "images" in content:
-        candidates.append(s["storage"])
-if "local-lvm" in candidates:
-    print("local-lvm")
-elif candidates:
-    print(candidates[0])
-else:
-    print("local-lvm")
-' 2>/dev/null || echo "local-lvm")
+if [ -z "$STORAGE" ]; then
+  echo -e "${RED}[ERROR] No se encontró ningún almacenamiento compatible con volúmenes de contenedor (rootdir).${NC}"
+  exit 1
+fi
 
-ok "Template storage: $TMPL_STORAGE"
-ok "Rootfs storage:   $ROOT_STORAGE"
+echo -e "${GREEN}[+] Almacenamiento LXC seleccionado: ${STORAGE}${NC}"
 
-# ─── Download Debian 13 template ─────────────────────────────────────────────
-info "Checking for Debian 13 template..."
+# 2.3. Detectar almacenamiento de plantillas (vztmpl)
+TEMPLATE_STORAGE=$(pvesm status -content vztmpl | awk 'NR>1 {print $1}' | head -n1)
+if [ -z "$TEMPLATE_STORAGE" ]; then
+  TEMPLATE_STORAGE="local"
+fi
+
+# ------------------------------------------------------------------------------
+# 3. Descarga de Plantilla LXC y Creación del Contenedor
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}[+] Actualizando catálogo de plantillas Debian...${NC}"
 pveam update >/dev/null 2>&1 || true
 
-TEMPLATE=$(pveam available --section system 2>/dev/null | grep -oP 'debian-13-standard_\S+' | head -1 || true)
-if [[ -z "$TEMPLATE" ]]; then
-    TEMPLATE=$(pveam available 2>/dev/null | grep -oP 'debian-13-standard_\S+' | head -1 || true)
-fi
-[[ -n "$TEMPLATE" ]] || fatal "Could not find Debian 13 template. Check 'pveam available'."
+TEMPLATE_FILE=$(pveam available -section system | grep -E "debian-(13|12)-standard" | tail -n1 | awk '{print $2}')
 
-if pveam list "$TMPL_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
-    ok "Template already downloaded: $TEMPLATE"
-else
-    info "Downloading $TEMPLATE to $TMPL_STORAGE..."
-    pveam download "$TMPL_STORAGE" "$TEMPLATE"
-    ok "Template downloaded."
+if [ -z "$TEMPLATE_FILE" ]; then
+  TEMPLATE_FILE="debian-12-standard_12.2-1_amd64.tar.zst"
 fi
 
-# ─── Create the LXC container ────────────────────────────────────────────────
-info "Creating LXC container $VMID..."
-pct create "$VMID" "${TMPL_STORAGE}:vztmpl/${TEMPLATE}" \
-    --hostname openclaw \
-    --password "$CT_PASSWORD" \
-    --rootfs "${ROOT_STORAGE}:${DISK_SIZE}" \
-    --memory "$MEMORY" \
-    --cores "$CORES" \
-    --net0 name=eth0,bridge=vmbr0,ip=dhcp \
-    --unprivileged 0 \
-    --start 0
-ok "Container $VMID created."
+echo -e "${YELLOW}[+] Descargando plantilla ${TEMPLATE_FILE} en '${TEMPLATE_STORAGE}'...${NC}"
+pveam download "$TEMPLATE_STORAGE" "$TEMPLATE_FILE" >/dev/null 2>&1 || true
 
-info "Starting container $VMID..."
-pct start "$VMID"
-ok "Container started."
+TEMPLATE_PATH="${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE_FILE}"
 
-info "Waiting for container to boot..."
-sleep 3
+echo -e "${YELLOW}[+] Creando contenedor LXC (VMID: ${VMID}) en storage '${STORAGE}'...${NC}"
+pct create "$VMID" "$TEMPLATE_PATH" \
+  --ostype debian \
+  --hostname openclaw-ai \
+  --cores "$CPU_CORES" \
+  --memory "$MEMORY" \
+  --swap 1024 \
+  --features nesting=1 \
+  --unprivileged 0 \
+  --storage "$STORAGE" \
+  --rootfs "${STORAGE}:${DISK_SIZE}" \
+  --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --password "$CONTAINER_PASSWORD" \
+  --start 1
 
-# Helper: run a command inside the container
-ct_exec() {
-    pct exec "$VMID" -- bash -c "$1"
-}
+echo -e "${GREEN}[+] Contenedor iniciado correctamente. Esperando red...${NC}"
+sleep 5
 
-# ─── Wait for network ────────────────────────────────────────────────────────
-info "Waiting for DHCP lease (up to 30s)..."
-CT_IP=""
-for i in $(seq 1 30); do
-    CT_IP=$(ct_exec "hostname -I 2>/dev/null" | awk '{print $1}' || true)
-    if [[ -n "$CT_IP" && "$CT_IP" != "127.0.0.1" ]]; then
-        break
-    fi
-    CT_IP=""
-    sleep 1
-done
-[[ -n "$CT_IP" ]] || warn "Could not detect container IP — continuing anyway."
-ok "Container IP: ${CT_IP:-unknown}"
+# ------------------------------------------------------------------------------
+# 4. Aprovisionamiento dentro del LXC
+# ------------------------------------------------------------------------------
+echo -e "${YELLOW}[+] Instalando paquetes, escritorio LXQt, Chrome y OpenClaw...${NC}"
 
-# ─── Install packages inside the container ────────────────────────────────────
-info "Updating packages and installing prerequisites..."
-ct_exec "
-    export DEBIAN_FRONTEND=noninteractive
-
-    # Fix locale warnings
-    apt-get update && apt-get install -y locales 2>&1 | grep -v 'Failed to write'
-    sed -i 's/^# *en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
-    locale-gen en_US.UTF-8 >/dev/null 2>&1
-    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-    export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-
-    apt-get upgrade -y 2>&1 | grep -v 'Failed to write'
-    apt-get install -y curl ca-certificates gnupg git 2>&1 | grep -v 'Failed to write'
-"
-ok "Prerequisites installed."
-
-info "Installing Node.js 22..."
-ct_exec "
-    export DEBIAN_FRONTEND=noninteractive
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - 2>&1 | tail -3
-    apt-get install -y nodejs 2>&1 | grep -v 'Failed to write'
-"
-ok "Node.js installed."
-
-info "Installing Homebrew (required for OpenClaw skills)..."
-ct_exec "
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y build-essential procps file 2>&1 | grep -v -E 'Failed to write|Permission denied'
-
-    # Homebrew must be installed as a non-root user
-    useradd -m -s /bin/bash brewuser 2>/dev/null || true
-    echo 'brewuser ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/brewuser
-
-    # Install Homebrew as brewuser
-    su - brewuser -c 'NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"' 2>&1 | tail -5
-
-    # Make brew available system-wide for root
-    echo '[ -x /home/linuxbrew/.linuxbrew/bin/brew ] && eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\"' >> /root/.bashrc
-    ln -sf /home/linuxbrew/.linuxbrew/bin/brew /usr/local/bin/brew
-"
-ok "Homebrew installed."
-
-info "Installing OpenClaw..."
-ct_exec "npm install -g openclaw@latest 2>&1 | tail -5"
-ok "OpenClaw installed."
-
-info "Installing LXQt, TigerVNC, noVNC (this takes a few minutes)..."
-ct_exec "
-    export DEBIAN_FRONTEND=noninteractive
-    export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-    apt-get install -y lxqt openbox lxterminal tigervnc-standalone-server novnc websockify dbus-x11 fonts-noto-color-emoji 2>&1 \
-        | grep -v -E 'Failed to write|Failed to send reload|Permission denied|Cannot set LC_'
-"
-ok "Desktop environment installed."
-
-info "Installing Google Chrome..."
-ct_exec "
-    export DEBIAN_FRONTEND=noninteractive
-    curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
-    apt-get install -y /tmp/chrome.deb 2>&1 | grep -v -E 'Failed to write|Permission denied'
-    rm -f /tmp/chrome.deb
-"
-ok "Google Chrome installed."
-
-# ─── Configure OpenClaw ──────────────────────────────────────────────────────
-info "Configuring OpenClaw..."
-AUTH_TOKEN=$(openssl rand -hex 16)
-
-ct_exec "
-    openclaw config set gateway.mode local
-    openclaw config set gateway.bind lan
-    openclaw config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
-    openclaw config set gateway.auth.token '${AUTH_TOKEN}'
-"
-ok "OpenClaw configured (token: $AUTH_TOKEN)."
-
-info "Installing OpenClaw browser extension..."
-ct_exec "openclaw browser extension install 2>&1 | tail -5 || true"
-ok "OpenClaw browser extension installed."
-
-# ─── Configure VNC ───────────────────────────────────────────────────────────
-info "Configuring VNC..."
-ct_exec "
-    mkdir -p /root/.config/tigervnc
-    echo '${CT_PASSWORD}' | vncpasswd -f > /root/.config/tigervnc/passwd
-    chmod 600 /root/.config/tigervnc/passwd
-"
-
-ct_exec "cat > /root/.config/tigervnc/xstartup << 'XSTARTUP'
+pct exec "$VMID" -- bash -c "cat << 'EOF' > /tmp/inner-setup.sh
 #!/bin/bash
+set -ex
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update && apt-get install -y \
+  curl wget git build-essential ca-certificates sudo \
+  lxqt lxterminal tigervnc-standalone-server novnc dbus-x11 \
+  noto-color-emoji htop net-tools x11-utils
+
+# Instalación de Google Chrome
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
+apt-get install -y /tmp/chrome.deb || apt-get install -fy
+rm -f /tmp/chrome.deb
+
+# Instalación de Node.js 22
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+
+# Instalación de OpenClaw y Homebrew
+npm install -g openclaw@latest || true
+NONINTERACTIVE=1 bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" || true
+
+# Configuración VNC y LXQt
+mkdir -p /root/.vnc
+echo '$CONTAINER_PASSWORD' | vncpasswd -f > /root/.vnc/passwd
+chmod 600 /root/.vnc/passwd
+
+cat << 'XSTART' > /root/.vnc/xstartup
+#!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
-exec dbus-launch --exit-with-session startlxqt
-XSTARTUP
-chmod +x /root/.config/tigervnc/xstartup"
+exec startlxqt
+XSTART
+chmod +x /root/.vnc/xstartup
 
-# Configure lxterminal with dark theme
-ct_exec "
-    mkdir -p /root/.config/lxterminal
-    cat > /root/.config/lxterminal/lxterminal.conf << 'CONF'
-[general]
-fontname=Monospace 12
-bgcolor=#1e1e2e
-fgcolor=#cdd6f4
-palette_color_0=#45475a
-palette_color_1=#f38ba8
-palette_color_2=#a6e3a1
-palette_color_3=#f9e2af
-palette_color_4=#89b4fa
-palette_color_5=#f5c2e7
-palette_color_6=#94e2d5
-palette_color_7=#bac2de
-palette_color_8=#585b70
-palette_color_9=#f38ba8
-palette_color_10=#a6e3a1
-palette_color_11=#f9e2af
-palette_color_12=#89b4fa
-palette_color_13=#f5c2e7
-palette_color_14=#94e2d5
-palette_color_15=#a6adc8
-scrollback=10000
-CONF
-"
+# Accesos directos de escritorio
+mkdir -p /root/Desktop
 
-# Set noVNC scaling to auto by default
-ct_exec "sed -i \"s/UI.initSetting('resize', 'off')/UI.initSetting('resize', 'scale')/\" /usr/share/novnc/app/ui.js"
-ok "VNC configured (auto-scaling enabled)."
-
-# ─── Disable LXC-incompatible LXQt components ───────────────────────────────
-info "Disabling LXC-incompatible LXQt components..."
-ct_exec "
-    mkdir -p /root/.config/autostart
-    # Disable power management (no hardware in LXC)
-    cat > /root/.config/autostart/lxqt-powermanagement.desktop << 'NOAUTO'
+cat << 'DESK1' > /root/Desktop/OpenClaw-Wizard.desktop
 [Desktop Entry]
-Type=Application
-Name=LXQt Power Management
-Hidden=true
-NOAUTO
-    # Disable screen saver (not needed in VNC)
-    cat > /root/.config/autostart/lxqt-xscreensaver-autostart.desktop << 'NOAUTO'
-[Desktop Entry]
-Type=Application
-Name=LXQt Screen Saver
-Hidden=true
-NOAUTO
-"
-ok "LXC-incompatible components disabled."
-
-# ─── Configure Google Chrome for root user ───────────────────────────────────
-info "Configuring Google Chrome..."
-ct_exec "
-    # Chrome requires --no-sandbox when running as root
-    sed -i 's|Exec=/usr/bin/google-chrome-stable|Exec=/usr/bin/google-chrome-stable --no-sandbox|g' /usr/share/applications/google-chrome.desktop
-
-    mkdir -p /root/Desktop
-    cp /usr/share/applications/google-chrome.desktop /root/Desktop/
-    chmod +x /root/Desktop/google-chrome.desktop
-
-    # Wrapper so CLI calls also get --no-sandbox
-    cat > /usr/local/bin/google-chrome << 'WRAPPER'
-#!/bin/bash
-exec /usr/bin/google-chrome-stable --no-sandbox \"\$@\"
-WRAPPER
-    chmod +x /usr/local/bin/google-chrome
-
-    update-alternatives --set x-www-browser /usr/bin/google-chrome-stable 2>/dev/null || true
-    update-alternatives --set gnome-www-browser /usr/bin/google-chrome-stable 2>/dev/null || true
-    xdg-mime default google-chrome.desktop x-scheme-handler/http 2>/dev/null || true
-    xdg-mime default google-chrome.desktop x-scheme-handler/https 2>/dev/null || true
-    xdg-mime default google-chrome.desktop text/html 2>/dev/null || true
-"
-ok "Google Chrome configured."
-
-# ─── Configure LXQt default terminal ─────────────────────────────────────────
-info "Setting lxterminal as default terminal..."
-ct_exec "
-    mkdir -p /root/.config/lxqt
-    cat > /root/.config/lxqt/session.conf << 'CONF'
-[General]
-__userfile__=true
-
-[Environment]
-TERM=xterm-256color
-
-[Preferred Applications]
-terminal_emulator=lxterminal
-CONF
-"
-ok "Default terminal configured."
-
-# ─── Create desktop shortcuts ────────────────────────────────────────────────
-info "Creating desktop shortcuts..."
-
-# Terminal shortcut
-ct_exec "cat > /root/Desktop/terminal.desktop << 'SHORTCUT'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Terminal
-Comment=Open a terminal
-Exec=lxterminal
-Icon=utilities-terminal
-Terminal=false
-Categories=System;TerminalEmulator;
-StartupNotify=true
-SHORTCUT
-chmod +x /root/Desktop/terminal.desktop"
-
-# OpenClaw Onboarding wizard (runs in terminal)
-ct_exec "cat > /root/Desktop/openclaw-onboard.desktop << 'SHORTCUT'
-[Desktop Entry]
-Version=1.0
 Type=Application
 Name=OpenClaw Setup Wizard
-Comment=Run the OpenClaw onboarding wizard to configure your AI assistant
-Exec=lxterminal --title='OpenClaw Onboarding' -e sh -c 'openclaw onboard; exec bash'
+Comment=Run OpenClaw Onboarding Wizard
+Exec=lxterminal -e "openclaw onboard"
 Icon=utilities-terminal
 Terminal=false
 Categories=Utility;
-StartupNotify=true
-SHORTCUT
-chmod +x /root/Desktop/openclaw-onboard.desktop"
+DESK1
+chmod +x /root/Desktop/OpenClaw-Wizard.desktop
 
-# OpenClaw Dashboard (opens in Chrome with token)
-ct_exec "cat > /root/Desktop/openclaw-dashboard.desktop << SHORTCUT
+cat << 'DESK2' > /root/Desktop/OpenClaw-Dashboard.desktop
 [Desktop Entry]
-Version=1.0
 Type=Application
 Name=OpenClaw Dashboard
-Comment=Open the OpenClaw Control UI in Google Chrome
-Exec=google-chrome-stable --no-sandbox http://127.0.0.1:18789/#token=${AUTH_TOKEN}
-Icon=web-browser
+Comment=Open OpenClaw Dashboard in Chrome
+Exec=google-chrome-stable --no-sandbox http://localhost:18789
+Icon=google-chrome
 Terminal=false
-Categories=Network;WebBrowser;
-StartupNotify=true
-SHORTCUT
-chmod +x /root/Desktop/openclaw-dashboard.desktop"
+Categories=Network;
+DESK2
+chmod +x /root/Desktop/OpenClaw-Dashboard.desktop
 
-ok "Desktop shortcuts created."
-
-# ─── Create systemd services ─────────────────────────────────────────────────
-info "Creating systemd services..."
-
-ct_exec "cat > /etc/systemd/system/openclaw-gateway.service << 'SVC'
+# Servicios Systemd
+cat << 'SERV1' > /etc/systemd/system/openclaw-gateway.service
 [Unit]
-Description=OpenClaw Gateway
+Description=OpenClaw Gateway Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/openclaw gateway run --bind lan --auth token
+User=root
+ExecStart=/usr/bin/env openclaw gateway
 Restart=always
 RestartSec=5
-Environment=NODE_ENV=production
-WorkingDirectory=/root
 
 [Install]
 WantedBy=multi-user.target
-SVC"
+SERV1
 
-ct_exec "cat > /etc/systemd/system/vncserver.service << SVC
+cat << 'SERV2' > /etc/systemd/system/vncserver.service
 [Unit]
 Description=TigerVNC Server
 After=network.target
 
 [Service]
 Type=forking
-Environment=HOME=/root
-ExecStartPre=/bin/sh -c \"/usr/bin/vncserver -kill :1 > /dev/null 2>&1 || :\"
-ExecStart=/usr/bin/vncserver :1 -geometry ${VNC_RES} -depth 24 -localhost yes
+User=root
+ExecStart=/usr/bin/vncserver :1 -geometry ${VNC_RES} -depth 24
 ExecStop=/usr/bin/vncserver -kill :1
 Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-SVC"
+SERV2
 
-ct_exec "cat > /etc/systemd/system/novnc.service << 'SVC'
+cat << 'SERV3' > /etc/systemd/system/novnc.service
 [Unit]
-Description=noVNC WebSocket Proxy
+Description=noVNC Web Proxy
 After=vncserver.service
-Requires=vncserver.service
 
 [Service]
 Type=simple
-ExecStart=/bin/websockify --web=/usr/share/novnc/ 6080 localhost:5901
-Restart=on-failure
-RestartSec=5
+User=root
+ExecStart=/usr/share/novnc/utils/novnc_proxy --vnc localhost:5901 --listen 6080
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-SVC"
+SERV3
 
-ct_exec "
-    systemctl daemon-reload
-    systemctl enable --now openclaw-gateway.service
-    systemctl enable --now vncserver.service
-    systemctl enable --now novnc.service
+systemctl daemon-reload
+systemctl enable openclaw-gateway vncserver novnc
+systemctl start openclaw-gateway vncserver novnc || true
+
+EOF
 "
-ok "All services enabled and started."
 
-sleep 3
+pct exec "$VMID" -- bash /tmp/inner-setup.sh
+pct exec "$VMID" -- rm -f /tmp/inner-setup.sh
 
-# ─── Verify services ─────────────────────────────────────────────────────────
-info "Verifying services..."
-for svc in openclaw-gateway vncserver novnc; do
-    if ct_exec "systemctl is-active --quiet $svc"; then
-        ok "$svc is running."
-    else
-        warn "$svc failed to start. Check with: pct exec $VMID -- systemctl status $svc"
-    fi
+# ------------------------------------------------------------------------------
+# 5. Información final de acceso
+# ------------------------------------------------------------------------------
+CONTAINER_IP=""
+for i in {1..10}; do
+  CONTAINER_IP=$(pct exec "$VMID" -- ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' || true)
+  if [ -n "$CONTAINER_IP" ]; then
+    break
+  fi
+  sleep 2
 done
 
-# Re-detect IP in case it changed
-CT_IP=$(ct_exec "hostname -I 2>/dev/null" | awk '{print $1}' || echo "unknown")
-
-# ─── Print connection info ────────────────────────────────────────────────────
-echo
-echo -e "${BOLD}╔═══════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║           OpenClaw LXC Setup Complete!            ║${NC}"
-echo -e "${BOLD}╚═══════════════════════════════════════════════════╝${NC}"
-echo
-echo -e "  ${BOLD}Container ID:${NC}  $VMID"
-echo -e "  ${BOLD}Container IP:${NC}  $CT_IP"
-echo
-echo -e "  ${BOLD}OpenClaw Dashboard:${NC}"
-echo -e "    http://${CT_IP}:18789/"
-echo -e "    Auth token: ${CYAN}${AUTH_TOKEN}${NC}"
-echo
-echo -e "  ${BOLD}noVNC (remote desktop):${NC}"
-echo -e "    http://${CT_IP}:6080/vnc.html"
-echo -e "    VNC password: (same as container password)"
-echo
-echo -e "  ${BOLD}Browser Extension:${NC}"
-echo -e "    Open Chrome → chrome://extensions → Enable Developer Mode"
-echo -e "    Click 'Load unpacked' and select the OpenClaw extension directory"
-echo
-echo -e "  ${BOLD}SSH:${NC}"
-echo -e "    ssh root@${CT_IP}"
-echo
-echo -e "  ${BOLD}Manage container:${NC}"
-echo -e "    pct enter $VMID"
-echo -e "    pct stop $VMID"
-echo -e "    pct start $VMID"
-echo
+echo -e "\n${GREEN}====================================================${NC}"
+echo -e "${GREEN}    ¡Instalación de OpenClaw completada con éxito!  ${NC}"
+echo -e "${GREEN}====================================================${NC}"
+echo -e "VMID del contenedor : ${VMID}"
+echo -e "Almacenamiento usado: ${STORAGE}"
+echo -e "IP del contenedor   : ${CONTAINER_IP:-'Asignada por DHCP'}"
+echo -e "----------------------------------------------------"
+echo -e "Dashboard OpenClaw  : http://${CONTAINER_IP:-'<IP-CONTENEDOR>'}:18789/"
+echo -e "Escritorio noVNC    : http://${CONTAINER_IP:-'<IP-CONTENEDOR>'}:6080/vnc.html"
+echo -e "Acceso SSH          : ssh root@${CONTAINER_IP:-'<IP-CONTENEDOR>'}"
+echo -e "====================================================\n"
