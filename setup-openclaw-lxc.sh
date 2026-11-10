@@ -84,7 +84,7 @@ fi
 echo -e "${YELLOW}[+] Actualizando catálogo de plantillas Debian...${NC}"
 pveam update >/dev/null 2>&1 || true
 
-TEMPLATE_FILE=$(pveam available -section system | grep -E "debian-(13|12)-standard" | tail -n1 | awk '{print $2}')
+TEMPLATE_FILE=$(pveam available -section system | grep "debian-12-standard" | grep "amd64" | tail -n1 | awk '{print $2}')
 
 if [ -z "$TEMPLATE_FILE" ]; then
   TEMPLATE_FILE="debian-12-standard_12.2-1_amd64.tar.zst"
