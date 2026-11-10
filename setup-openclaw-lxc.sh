@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# OpenClaw Proxmox LXC Setup Script (Con corrección de DNS en LXC)
+# OpenClaw Proxmox LXC Setup Script
 # ==============================================================================
 
 set -euo pipefail
@@ -94,6 +94,21 @@ export DEBIAN_FRONTEND=noninteractive
 # Forzar resolución DNS pública antes de actualizar repositorios
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf
+
+# Reemplazar la configuración de debian.sources con la estructura corregida
+cat << 'SOURCES' > /etc/apt/sources.list.d/debian.sources
+Types: deb
+URIs: http://deb.debian.org/debian/
+Suites: trixie trixie-updates
+Components: main contrib non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security/
+Suites: trixie-security
+Components: main contrib non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+SOURCES
 
 # Actualizar repos e instalar dependencias básicas y entorno gráfico
 apt-get update && apt-get install -y \\
