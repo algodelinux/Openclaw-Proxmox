@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# OpenClaw Proxmox LXC Setup Script (Con corrección de fuentes emoji)
+# OpenClaw Proxmox LXC Setup Script (Con configuración de Locales y DNS)
 # ==============================================================================
 
 set -euo pipefail
@@ -79,7 +79,7 @@ pct create "$VMID" "$TEMPLATE_PATH" \
   --password "$CONTAINER_PASSWORD" \
   --start 1
 
-echo -e "${YELLOW}[+] Esperando a que el contenedor inicie red...${NC}"
+echo -e "${YELLOW}[+] Esperando inicialización del contenedor...${NC}"
 sleep 5
 
 # 5. Generación del script interno en el host
@@ -91,11 +91,11 @@ set -ex
 
 export DEBIAN_FRONTEND=noninteractive
 
-# Forzar resolución DNS pública antes de actualizar repositorios
+# Forzar resolución DNS pública
 echo "nameserver 1.1.1.1" > /etc/resolv.conf
 echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-# Reemplazar la configuración de debian.sources con la estructura corregida
+# Reemplazar la configuración de debian.sources con los repositorios validados
 cat << 'SOURCES' > /etc/apt/sources.list.d/debian.sources
 Types: deb
 URIs: http://deb.debian.org/debian/
@@ -110,11 +110,34 @@ Components: main contrib non-free-firmware
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 SOURCES
 
-# Actualizar repos e instalar dependencias básicas y entorno gráfico (usando fonts-noto-color-emoji)
+# Espera activa: verificar conectividad real antes de ejecutar apt
+echo "[+] Verificando resolución de red y DNS dentro del contenedor..."
+for i in {1..20}; do
+  if ping -c 1 deb.debian.org >/dev/null 2>&1; then
+    echo "[+] Red y DNS operativos."
+    break
+  fi
+  echo "Esperando respuesta de red (\$i/20)..."
+  sleep 2
+done
+
+# Configurar reintentos automáticos para evitar errores por micro-cortes
+echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries
+echo 'Acquire::http::Timeout "15";' >> /etc/apt/apt.conf.d/80retries
+
+# Actualizar repos e instalar dependencias básicas, locales y entorno gráfico
 apt-get update && apt-get install -y \\
-  curl wget git build-essential ca-certificates sudo \\
+  curl wget git build-essential ca-certificates sudo locales \\
   lxqt lxterminal tigervnc-standalone-server novnc dbus-x11 \\
   fonts-noto-color-emoji htop net-tools x11-utils
+
+# Configuración de Locales (en_US y es_ES)
+sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+sed -i 's/# es_ES.UTF-8 UTF-8/es_ES.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
+update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
 
 # Google Chrome
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb
