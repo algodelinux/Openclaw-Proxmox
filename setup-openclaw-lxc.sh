@@ -188,12 +188,27 @@ wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.de
 apt-get install -y /tmp/chrome.deb || apt-get install -fy
 rm -f /tmp/chrome.deb
 
-# Instalación de OpenClaw mediante el script oficial oneliner
+# ------------------------------------------------------------------------------
+# Instalación oficial de OpenClaw y registro nativo de su servicio Systemd
+# ------------------------------------------------------------------------------
 curl -fsSL https://openclaw.ai/install.sh | bash
 
-# Detección dinámica de la ruta absoluta del binario de OpenClaw
-OPENCLAW_BIN=$(which openclaw 2>/dev/null || find / -name openclaw -type f 2>/dev/null | head -n1)
-OPENCLAW_BIN=${OPENCLAW_BIN:-/usr/local/bin/openclaw}
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.openclaw/bin"
+
+# Crear unidad Systemd nativa con los parámetros de memoria/heap recomendados
+openclaw gateway install
+
+# Permitir conexiones al Dashboard y WebSocket desde la red local (modo lan)
+openclaw config set gateway.bind lan
+
+# Drop-in de Systemd para garantizar las variables de localización en español
+mkdir -p /etc/systemd/system/openclaw-gateway.service.d
+cat << 'LOCALE_OVERRIDE' > /etc/systemd/system/openclaw-gateway.service.d/locale.conf
+[Service]
+Environment=LANG=es_ES.UTF-8
+Environment=LC_ALL=es_ES.UTF-8
+Environment=LANGUAGE=es_ES.UTF-8
+LOCALE_OVERRIDE
 
 # ------------------------------------------------------------------------------
 # Configuración de VNC (Inicio Directo Xvnc)
@@ -241,7 +256,7 @@ VNC_LAUNCHER
 chmod +x /usr/local/bin/start-vnc.sh
 
 # ------------------------------------------------------------------------------
-# Unidades Systemd (VNC, noVNC, OpenClaw Gateway)
+# Unidades Systemd (VNC y noVNC)
 # ------------------------------------------------------------------------------
 cat << 'SERV_VNC' > /etc/systemd/system/vncserver.service
 [Unit]
@@ -278,30 +293,10 @@ Restart=always
 WantedBy=multi-user.target
 SERV_NOVNC
 
-cat << SERV_OPENCLAW > /etc/systemd/system/openclaw-gateway.service
-[Unit]
-Description=OpenClaw Gateway Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Environment=HOME=/root
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.openclaw/bin
-Environment=LANG=es_ES.UTF-8
-Environment=LC_ALL=es_ES.UTF-8
-Environment=LANGUAGE=es_ES.UTF-8
-ExecStart=${OPENCLAW_BIN} gateway
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SERV_OPENCLAW
-
-# Recargar e iniciar todos los servicios
+# Recargar y reiniciar todos los servicios para aplicar configuración
 systemctl daemon-reload
 systemctl enable openclaw-gateway vncserver novnc
-systemctl start openclaw-gateway vncserver novnc || true
+systemctl restart openclaw-gateway vncserver novnc || true
 
 EOF_PROVISION
 
